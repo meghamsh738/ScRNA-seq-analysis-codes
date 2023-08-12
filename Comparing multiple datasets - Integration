@@ -1,0 +1,474 @@
+
+```{r}
+# Load libraries
+library(SingleCellExperiment)
+library(Seurat)
+library(tidyverse)
+library(Matrix)
+library(scales)
+library(cowplot)
+library(RCurl)
+```
+
+
+```{r}
+
+# Specify the name of the directory you want to create
+directory_name <- "Sample_A_Sample_B"
+
+# Specify the location where the directory should be created
+# Full path example:
+full_path <- "../(Enter directory for output)/"
+
+
+# Create the directory using the full path
+dir.create(file.path(full_path, directory_name))
+
+
+output_dir <- "../(Enter directory for output)/Sample_A_Sample_B"
+```
+
+
+```{r}
+Sample_A <- Read10X(data.dir = "../(Enter pathway to sample A)/Sample_A/")
+Sample_A_filter <- CreateSeuratObject(counts = Sample_A, min.features = 100)
+
+
+Sample_B <- Read10X(data.dir = "../(Enter pathway to sample B)/Sample_B/")
+Sample_B_filter <- CreateSeuratObject(counts = Sample_B, min.features = 100)
+
+rm(Sample_A, Sample_B)
+
+
+
+merged_seurat <- merge(Sample_A_filter, y = c(Sample_B_filter), add.cell.ids = c("Sample_A","Sample_B"),project = "merged")
+head(merged_seurat@meta.data)
+tail(merged_seurat@meta.data)
+# Add number of genes per UMI for each cell to metadata
+merged_seurat$log10GenesPerUMI <- log10(merged_seurat$nFeature_RNA) / log10(merged_seurat$nCount_RNA)
+# Compute percent mito ratio
+merged_seurat$mitoRatio <- PercentageFeatureSet(object = merged_seurat, pattern = "^mt-")
+merged_seurat$mitoRatio <- merged_seurat@meta.data$mitoRatio / 100
+# Create metadata dataframe
+metadata <- merged_seurat@meta.data
+# Add cell IDs to metadata
+metadata$cells <- rownames(metadata)
+# Create sample column
+metadata$sample <- NA
+
+metadata$sample[which(str_detect(metadata$cells, "^Sample_A"))] <- "Sample_A"
+metadata$sample[which(str_detect(metadata$cells, "^Sample_B"))] <- "Sample_B"
+
+
+# Rename columns
+metadata <- metadata %>%
+dplyr::rename(seq_folder = orig.ident,
+nUMI = nCount_RNA,
+nGene = nFeature_RNA)
+# Add metadata back to Seurat object
+merged_seurat@meta.data <- metadata
+# Create .RData object to load at any time
+# Visualize the number of cell counts per sample
+metadata %>%
+ggplot(aes(x=sample, fill=sample)) +
+geom_bar() +
+theme_classic() +
+theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+theme(plot.title = element_text(hjust=0.5, face="bold")) +
+ggtitle("NCells")
+# Visualize the number UMIs/transcripts per cell
+metadata %>%
+ggplot(aes(color=sample, x=nUMI, fill= sample)) +
+geom_density(alpha = 0.2) +
+scale_x_log10() +
+theme_classic() +
+ylab("Cell density") +
+geom_vline(xintercept = 2000)
+# Visualize the distribution of genes detected per cell via histogram
+metadata %>%
+ggplot(aes(color=sample, x=nGene, fill= sample)) +
+geom_density(alpha = 0.2) +
+theme_classic() +
+scale_x_log10() +
+geom_vline(xintercept = 300)
+# Visualize the distribution of genes detected per cell via boxplot
+metadata %>%
+ggplot(aes(x=sample, y=log10(nGene), fill=sample)) +
+geom_boxplot() +
+theme_classic() +
+theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+theme(plot.title = element_text(hjust=0.5, face="bold")) +
+ggtitle("NCells vs NGenes")
+# Visualize the correlation between genes detected and number of UMIs and determine whether strong presence of cells with low numbers of genes/UMIs
+metadata %>%
+ggplot(aes(x=nUMI, y=nGene, color=mitoRatio)) +
+geom_point() +
+scale_colour_gradient(low = "gray90", high = "black") +
+stat_smooth(method=lm) +
+scale_x_log10() +
+scale_y_log10() +
+theme_classic() +
+geom_vline(xintercept = 1200) +
+geom_hline(yintercept = 500) +
+facet_wrap(~sample)
+# Visualize the distribution of mitochondrial gene expression detected per cell
+metadata %>%
+ggplot(aes(color=sample, x=mitoRatio, fill=sample)) +
+geom_density(alpha = 0.2) +
+scale_x_log10() +
+theme_classic() +
+geom_vline(xintercept = 0.2)
+# Visualize the overall complexity of the gene expression by visualizing the genes detected per UMI
+metadata %>%
+ggplot(aes(x=log10GenesPerUMI, color = sample, fill=sample)) +
+geom_density(alpha = 0.2) +
+theme_classic() +
+geom_vline(xintercept = 0.85)
+
+# Filter out low quality cells using selected thresholds - these will change with experiment
+filtered_seurat <- subset(x = merged_seurat,
+subset= (nUMI >= 500) &
+(nGene >= 300) &
+(log10GenesPerUMI > 0.85) &
+(mitoRatio < 0.20))
+# Extract counts
+counts <- GetAssayData(object = filtered_seurat, slot = "counts")
+# Output a logical matrix specifying for each gene on whether or not there are more than zero counts per cell
+nonzero <- counts > 0
+# Sums all TRUE values and returns TRUE if more than 10 TRUE values per gene
+keep_genes <- Matrix::rowSums(nonzero) >= 10
+# Only keeping those genes expressed in more than 10 cells
+filtered_counts <- counts[keep_genes, ]
+# Reassign to filtered Seurat object
+filtered_seurat <- CreateSeuratObject(filtered_counts, meta.data = filtered_seurat@meta.data)
+
+
+
+split_seurat <- SplitObject(filtered_seurat, split.by = "sample")
+split_seurat <- split_seurat[c("Sample_A","Sample_B")]
+```
+
+
+
+```{r}
+project_list <- c(split_seurat$Sample_A, split_seurat$Sample_B)
+for (i in 1:length(project_list)){
+project_list[[i]] <- NormalizeData(project_list[[i]], verbose = FALSE)
+project_list[[i]] <- FindVariableFeatures(project_list[[i]], selection.method = 'vst', nfeatures = 3000)
+}
+Sample_A <- project_list[[1]]
+Sample_B <- project_list[[2]]
+
+
+#1 by 1 by 1 by 1 Integration
+project_list <- c(Sample_A, Sample_B)
+anchors <- FindIntegrationAnchors(object.list = project_list, dims = 1:30)
+Seurat_integrated <- IntegrateData(anchorset = anchors, dims = 1:30)
+rm(anchors)
+DefaultAssay(Seurat_integrated) <- 'integrated'
+all.genes <- rownames(Seurat_integrated)
+Seurat_integrated <- ScaleData(Seurat_integrated, features = all.genes)
+Seurat_integrated <- RunPCA(Seurat_integrated, features = VariableFeatures(object = Seurat_integrated))
+ElbowPlot(Seurat_integrated)
+DimPlot(Seurat_integrated, reduction = 'pca')
+Seurat_integrated <- FindNeighbors(Seurat_integrated, dims = 1:40, k.param = 20)
+Seurat_integrated <- FindClusters(Seurat_integrated, resolution = 0.20)
+Seurat_integrated <- RunUMAP(Seurat_integrated, dims = 1: 40, seed.use = 1, assay = "integrated")
+DefaultAssay(Seurat_integrated) <- 'RNA'
+DimPlot(Seurat_integrated, reduction = "umap", label = T)
+DimPlot(Seurat_integrated, reduction = 'umap', label = T, split.by = "sample", ncol = 3)
+
+library(gridExtra)
+
+
+# Set the desired order of groups
+group_order <- c('Sample_A', 'Sample_B')
+
+# Change the order of the factor levels
+Seurat_integrated$sample <- factor(Seurat_integrated$sample, levels = group_order)
+
+# Generate the first plot
+plot1 <- DimPlot(Seurat_integrated, reduction = "umap", label = TRUE)
+
+# Generate the second plot
+plot2 <- DimPlot(Seurat_integrated, reduction = "umap", label = TRUE, split.by = "sample", ncol = 3)
+
+output_dir <- "../(Enter directory for output)/Sample_A_Sample_B"
+
+ggsave(filename = file.path(output_dir, "UMAP.png"), plot = ggplotGrob(plot1), dpi = 300)
+ggsave(filename = file.path(output_dir, "UMAP_split.png"), plot = ggplotGrob(plot2), dpi = 300)
+```
+
+
+
+```{r}
+
+Seurat_integrated_cells <- FetchData(Seurat_integrated, 
+                     vars = c("ident", "sample")) %>%
+    dplyr::count(ident, sample) %>%
+    tidyr::spread(ident, n)
+
+# View table
+View(Seurat_integrated_cells)
+
+Seurat_integrated_markers <- FindAllMarkers(Seurat_integrated, only.pos = F, min.pct = 0.25, logfc.threshold = 0.25, base = exp(1))
+
+write.csv(Seurat_integrated_markers, file = file.path(output_dir, "Seurat_integrated_markers.csv"))
+
+top5 <- Seurat_integrated_markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+DefaultAssay(Seurat_integrated) <- 'RNA'
+Seurat_integrated <- ScaleData(Seurat_integrated, features = all.genes)
+
+
+# Generate the heatmap
+heatmap <- DoHeatmap(Seurat_integrated, features = top5$gene) + NoLegend()
+
+heatmap
+
+output_dir <- "../(Enter directory for output)/Sample_A_Sample_B"
+
+# Specify the file path and name for saving the heatmap
+file_path <- file.path(output_dir, "heatmap.tiff")
+
+# Save the heatmap as a TIFF image
+tiff(filename = file_path, width = 8, height = 6, units = "in", res = 300)
+print(heatmap)
+dev.off()
+```
+
+
+
+
+```{r}
+
+#Enter your list of genes here
+genes.list <- c("GeneA", "GeneB")
+
+output_dir <- "../(Enter directory for output)/Sample_A_Sample_B"
+
+
+vlnplots_dir <- file.path(output_dir, "Vlnplots")
+dir.create(vlnplots_dir, recursive = TRUE)
+
+plot.list <- list()
+datasample <- vector("character", length(genes.list))
+
+for (i in 1:length(genes.list)) {
+  plot.list[[i]] <- VlnPlot(object = Seurat_integrated, features = genes.list[[i]], split.by = "sample")
+  
+  datasample[[i]] <- paste(genes.list[[i]], ".png", sep = "")
+  
+  file_path <- file.path(vlnplots_dir, datasample[[i]])
+  
+  ggsave(filename = file_path, plot = plot.list[[i]])
+}
+
+#Enter your list of genes here
+genes.list <- c("GeneA", "GeneB")
+
+output_dir <- "../(Enter directory for output)/Sample_A_Sample_B"
+
+vlnplots_dir <- file.path(output_dir, "Featureplots")
+dir.create(vlnplots_dir, recursive = TRUE)
+
+plot.list <- list()
+datasample <- vector("character", length(genes.list))
+
+
+for (i in 1:length(genes.list)) {
+  plot.list[[i]] <- FeaturePlot(object = Seurat_integrated, features = genes.list[[i]], split.by = "sample", label = T)
+  
+  datasample[[i]] <- paste(genes.list[[i]], ".png", sep = "")
+  
+  file_path <- file.path(vlnplots_dir, datasample[[i]])
+  
+  ggsave(filename = file_path, plot = plot.list[[i]])
+}
+```
+
+```{r}
+genes.list <-  top5$gene
+
+output_dir <- "../(Enter directory for output)/Sample_A_Sample_B"
+
+
+vlnplots_dir <- file.path(output_dir, "Vlnplots_top10")
+dir.create(vlnplots_dir, recursive = TRUE)
+
+plot.list <- list()
+datasample <- vector("character", length(genes.list))
+
+for (i in 1:length(genes.list)) {
+  plot.list[[i]] <- VlnPlot(object = Seurat_integrated, features = genes.list[[i]], split.by = "sample")
+  
+  datasample[[i]] <- paste(genes.list[[i]], ".png", sep = "")
+  
+  file_path <- file.path(vlnplots_dir, datasample[[i]])
+  
+  ggsave(filename = file_path, plot = plot.list[[i]])
+}
+
+genes.list <-  top5$gene
+
+
+output_dir <- "../(Enter directory for output)/Sample_A_Sample_B"
+
+vlnplots_dir <- file.path(output_dir, "Featureplots_top10")
+dir.create(vlnplots_dir, recursive = TRUE)
+
+plot.list <- list()
+datasample <- vector("character", length(genes.list))
+
+for (i in 1:length(genes.list)) {
+  plot.list[[i]] <- FeaturePlot(object = Seurat_integrated, features = genes.list[[i]], split.by = "sample", label = T)
+  
+  datasample[[i]] <- paste(genes.list[[i]], ".png", sep = "")
+  
+  file_path <- file.path(vlnplots_dir, datasample[[i]])
+  
+  ggsave(filename = file_path, plot = plot.list[[i]])
+}
+```
+
+
+
+```{r}
+
+# Reshape the data frame from wide to long format
+df_long <- tidyr::gather(Seurat_integrated_cells, key = "Cluster", value = "ClusterNumber", -sample)
+
+# Define the custom breaks
+custom_breaks <- c(0,1000, 2000, 3000, 4000, 5000, 6000, 7000)
+
+# Create the plot
+plot <- ggplot(df_long, aes(x = sample, y = ClusterNumber, fill = Cluster)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "sample", y = "Cell Number", fill = "Cluster") +
+  theme_minimal() +
+  scale_y_continuous(breaks = custom_breaks)
+
+output_dir <- "../(Enter directory for output)/Sample_A_Sample_B"
+
+
+# Specify the file path and name for saving the plot
+file_path <- file.path(output_dir, "raw_cluster_numbers.png")
+
+# Save the plot as a PNG file
+ggsave(filename = file_path, plot = plot, dpi = 300)
+
+
+write.csv(x = df_long, file = "../(Enter directory for output)/Sample_A_Sample_B/raw_cluster_numbers.csv")
+
+```
+
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+
+# Reshape the data frame from wide to long format
+df_long <- tidyr::gather(Seurat_integrated_cells, key = "Cluster", value = "ClusterNumber", -sample)
+
+# Calculate total cell counts per sample
+df_long <- df_long %>%
+  group_by(sample) %>%
+  mutate(TotalCells = sum(ClusterNumber, na.rm = TRUE))  # add na.rm = TRUE to ignore NA values
+
+# Replace NA values in ClusterNumber with 0
+df_long$ClusterNumber[is.na(df_long$ClusterNumber)] <- 0
+
+# Normalize cell numbers by total cells
+df_long <- df_long %>%
+  mutate(NormalizedNumber = (ClusterNumber / TotalCells) * 100)
+
+# Define the custom breaks
+custom_breaks <- seq(0, 100, by = 10)
+
+# Create the plot
+plot <- ggplot(df_long, aes(x = sample, y = NormalizedNumber, fill = Cluster)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = paste0(round(NormalizedNumber), "%")), vjust = -0.5, position = position_dodge(width = 1)) +  # Add percentage labels on top of bars
+  labs(x = "Sample", y = "Normalized Cell Number (%)", fill = "Cluster") +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0, 100), breaks = custom_breaks)
+
+
+output_dir <- "../(Enter directory for output)/Sample_A_Sample_B"
+
+# Specify the file path and name for saving the plot
+file_path <- file.path(output_dir, "cluster_numbers_normalised.png")
+
+# Save the plot as a PNG file
+ggsave(filename = file_path, plot = plot, dpi = 300)
+
+write.csv(x = df_long, file = "../(Enter directory for output)/Sample_A_Sample_B/cluster_numbers_normalised.csv")
+
+
+```
+
+
+
+```{r}
+output_dir <- "../(Enter directory for output)/Sample_A_Sample_B"
+
+# Specify the file path for reading the CSV file
+file_path <- file.path(output_dir, "Seurat_integrated_markers.csv")
+
+# Read in the CSV file
+data <- read_csv(file_path)
+
+# Define the number of clusters
+num_clusters <- n_distinct(data$cluster)
+
+# Specify the output directory
+output_dir <- "../(Enter directory for output)/Sample_A_Sample_B"
+
+library(openxlsx)
+
+
+# Create an Excel workbook object
+wb <- createWorkbook()
+
+# Loop over each cluster
+for (i in 0:num_clusters) {
+  # Filter the data based on cluster number
+  cluster_data <- dplyr::filter(data, cluster == i)
+  
+  # Filter the genes based on p-value and log-fold change criteria
+  selected_genes <- dplyr::filter(cluster_data, p_val_adj < 0.05, avg_logFC > 0.5)
+  
+  # Create a new worksheet for the cluster and add the selected genes
+  addWorksheet(wb, sheetName = paste0("Cluster ", i))
+  writeData(wb, sheet = paste0("Cluster ", i), selected_genes)
+}
+
+# Specify the file path and name for saving the Excel workbook
+file_path <- file.path(output_dir, "Sample_A_Sample_B_makers_processed.xlsx")
+
+# Save the Excel workbook
+saveWorkbook(wb, file = file_path)
+
+```
+
+
+
+
+```{r}
+
+
+# Save the matrix data as CSV
+mat <- as.data.frame(GetAssayData(Seurat_integrated, "counts"))
+mat_file <- file.path(output_dir, "Sample_A_Sample_B_matrix.csv")
+write.csv(mat, file = mat_file)
+
+# Fetch and save the labels as CSV
+Labels <- FetchData(Seurat_integrated, vars = c("cells", "seurat_clusters", "orig.ident"))
+labels_file <- file.path(output_dir, "Sample_A_Sample_B_labels.csv")
+write.csv(Labels, file = labels_file)
+
+```
+
+
+
+
