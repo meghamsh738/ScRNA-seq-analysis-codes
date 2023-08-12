@@ -1,2 +1,27 @@
-# Follow the cell ranger installations step from the official website : https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/using/tutorial_in#:~:text=Installing%20Cell%20Ranger%201%20Login%20to%20a%20remote,...%208%20Other%20tutorials%20in%20this%20series%20
+## Cell Ranger Installation Steps
 
+Follow the [official Cell Ranger installation guide](https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/using/tutorial_in) to install Cell Ranger:
+
+1. Login to a remote machine.
+2. Download Cell Ranger using the provided link.
+3. Extract the downloaded tarball: `tar -xzvf cellranger-<version>.tar.gz`.
+4. Add the Cell Ranger directory to your PATH: `export PATH=$PATH:/path/to/cellranger`.
+
+## Running Cell Ranger Tutorial
+
+After installing Cell Ranger, follow the [tutorial on running your sample](https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/using/mkfastq).
+
+For easier analysis, set intron mode to `False` during the analysis. This excludes transcripts aligned to intronic regions, making the data noise-free.
+
+## Data Processing Steps
+
+1. In the output folder, navigate to `sample_name > outs > raw_feature_bc_matrix`.
+2. Copy the contents of this folder to a separate directory with the `sample_name`.
+3. As a prerequisite check, examine whether the number of cells captured in your sequencing matches the targeted cell count using the `web_summary.html` file.
+
+## Handling Replicates
+
+If the sequencing run contains replicates of the same sample:
+
+1. Run each replicate individually through Cell Ranger.
+2. Combine the results downstream in tools like Seurat and perform comparisons.
